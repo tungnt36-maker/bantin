@@ -1,0 +1,83 @@
+# Tu quet ban tin chung khoan tren may chu GitHub (15 phut/lan gio hanh chinh, 1 gio/lan con lai), dang len GitHub Pages (nhanh gh-pages).
+# Viet de chay lau dai: khong dung "action" ben ngoai nao (chi git + python co san tren may chu),
+# nen khong bi hong khi GitHub ngung ho tro phien ban cu cua cac action.
+# Quet ngay: tab Actions -> "Quet ban tin" -> Run workflow.
+name: Quet ban tin
+
+on:
+  schedule:
+    # Gio UTC (gio VN = UTC + 7). GitHub cho toi thieu 5 phut/lan va hay cham 5-15 phut khi dong may.
+    - cron: "*/15 0-9 * * 1-5"   # 7h-16h59 VN, thu 2-6 (gio giao dich + tin trong ngay): 15 phut/lan
+    - cron: "37 * * * *"         # cac gio con lai va cuoi tuan: 1 gio/lan
+    - cron: "2 10,15 * * *"      # them 17h02 va 22h02 VN moi ngay (luc VCBS hay dang ban tin chieu)
+    # Luot nao cung quet lai: nhan dinh VCBS ban moi nhat (doc chu trong file PDF), hang hoa, chi so, tin.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: quet-ban-tin
+  cancel-in-progress: false
+
+jobs:
+  quet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TZ: Asia/Ho_Chi_Minh
+      GH_TOKEN: ${{ github.token }}
+      BT_EVENT: ${{ github.event_name }}          # workflow_dispatch = bam tay "Run workflow" -> quet lai ca nhan dinh VCBS
+      VCBS_EMAIL: ${{ secrets.VCBS_EMAIL }}       # khong can nua (PDF VCBS tai tu do), de trong cung duoc
+    steps:
+      - name: Lay code va trang dang co
+        run: |
+          set -e
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git clone --depth 1 "$URL" code
+          git clone --depth 1 --branch gh-pages "$URL" pages || mkdir -p pages
+          mkdir -p code/state
+          cp -r pages/_state/. code/state/ 2>/dev/null || true
+
+      - name: Cai thu vien
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -q --upgrade pip
+          venv/bin/pip install -q requests pymupdf playwright
+          (google-chrome --version) || venv/bin/python -m playwright install --with-deps chromium
+
+      - name: Quet ban tin
+        id: quet
+        working-directory: code
+        run: ../venv/bin/python may_chu/quet_github.py
+
+      - name: Dang len GitHub Pages (nhanh gh-pages, chi giu 1 ban, khong phinh)
+        if: steps.quet.outputs.dang == '1'
+        run: |
+          set -e
+          rm -rf out && mkdir -p out/_state
+          cp -r code/site/. out/
+          cp -r code/state/. out/_state/
+          cd out
+          git init -q -b gh-pages
+          git config user.name "bantin-bot"; git config user.email "bantin-bot@users.noreply.github.com"
+          git add -A && git commit -q -m "Ban tin $(date '+%H:%M %d/%m/%Y')"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          echo "Da dang: https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/"
+
+      - name: Giu lich khong bi tat (kho 60 ngay khong doi se bi GitHub tat lich)
+        if: always()
+        working-directory: code
+        run: |
+          # Cach 1: bao GitHub "bat lai lich" moi lan chay -> bo dem 60 ngay khong bao gio cham moc
+          curl -s -o /dev/null -w "giu lich: %{http_code}\n" -X PUT -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/quet_ban_tin.yml/enable" || true
+          # Cach 2 (du phong): 40 ngay ghi 1 dong vao kho
+          last=$(git log -1 --format=%ct); now=$(date +%s)
+          if [ $(( (now - last) / 86400 )) -ge 40 ]; then
+            date '+%d/%m/%Y %H:%M' > may_chu/con_song.txt
+            git config user.name "bantin-bot"; git config user.email "bantin-bot@users.noreply.github.com"
+            git add may_chu/con_song.txt && git commit -q -m "Giu lich quet tu dong" && git push || true
+          fi
